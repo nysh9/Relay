@@ -1,0 +1,214 @@
+From 0f77d401c285ffb357856d9414f857a561596383 Mon Sep 17 00:00:00 2001
+From: Test <test@test.com>
+Date: Sun, 21 Jun 2026 11:29:01 +0000
+Subject: [PATCH] Add Deepgram Aura-2 TTS for low-confidence reprompts
+
+Synthesizes the existing reprompt text with Deepgram Aura-2 and sends
+the audio (base64 WAV) alongside the text over the reprompt message.
+Falls back to text-only if synthesis fails. Test harness plays the
+audio automatically.
+---
+ server/public/client.js | 16 ++++++++
+ server/src/server.ts    | 26 +++++++++----
+ server/src/ttsClient.ts | 82 +++++++++++++++++++++++++++++++++++++++++
+ server/src/types.ts     |  2 +-
+ 4 files changed, 118 insertions(+), 8 deletions(-)
+ create mode 100644 server/src/ttsClient.ts
+
+diff --git a/server/public/client.js b/server/public/client.js
+index bd97942..34a814d 100644
+--- a/server/public/client.js
++++ b/server/public/client.js
+@@ -22,6 +22,19 @@ function showBanner(text, kind) {
+   elBanner.style.display = text ? 'block' : 'none';
+ }
+ 
++function playBase64Audio(base64, mime) {
++  try {
++    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
++    const blob = new Blob([bytes], { type: mime });
++    const url = URL.createObjectURL(blob);
++    const audio = new Audio(url);
++    audio.addEventListener('ended', () => URL.revokeObjectURL(url));
++    void audio.play().catch((err) => console.error('Reprompt audio playback failed:', err));
++  } catch (err) {
++    console.error('Failed to decode reprompt audio:', err);
++  }
++}
++
+ function appendTranscriptLine(text, isFinal, language) {
+   const last = elTranscript.lastElementChild;
+   if (last && last.dataset.interim === 'true') {
+@@ -67,6 +80,9 @@ async function start() {
+         break;
+       case 'reprompt':
+         showBanner(msg.repromptMessage, 'warn');
++        if (msg.audio) {
++          playBase64Audio(msg.audio, msg.audioMime || 'audio/wav');
++        }
+         break;
+       case 'escalation':
+         showBanner(
+diff --git a/server/src/server.ts b/server/src/server.ts
+index 4ef9d95..8112015 100644
+--- a/server/src/server.ts
++++ b/server/src/server.ts
+@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
+ import { openDeepgramConnection } from './deepgramClient';
+ import { SessionManager } from './sessionManager';
+ import { fakeBrainProcess } from './brainStub';
++import { synthesizeSpeech } from './ttsClient';
+ import { streamBackupClip } from './backupAudio';
+ import { ClientToEarMessage, EarToClientMessage, Transcript, WireTranscript } from './types';
+ import { bufferToArrayBuffer } from './util';
+@@ -53,7 +54,7 @@ wss.on('connection', (ws: WebSocket) => {
+ 
+     deepgramConn = openDeepgramConnection({
+       onTranscript: (transcript: Transcript) => {
+-        handleTranscript(ws, sessionId, transcript);
++        void handleTranscript(ws, sessionId, transcript);
+       },
+       onUtteranceEnd: () => {
+         console.log(`[ear:${sessionId}] utterance end`);
+@@ -112,7 +113,7 @@ wss.on('connection', (ws: WebSocket) => {
+   });
+ });
+ 
+-function handleTranscript(ws: WebSocket, sessionId: string, transcript: Transcript) {
++async function handleTranscript(ws: WebSocket, sessionId: string, transcript: Transcript) {
+   // Enrich the internal transcript into the frontend's WireTranscript shape.
+   const wire: WireTranscript = {
+     sessionId,
+@@ -137,12 +138,23 @@ function handleTranscript(ws: WebSocket, sessionId: string, transcript: Transcri
+       void fakeBrainProcess(transcript);
+       break;
+ 
+-    case 'reprompt':
+-      send(ws, {
+-        type: 'reprompt',
+-        repromptMessage: "I didn't catch that, can you repeat?",
+-      });
++    case 'reprompt': {
++      const repromptMessage = "I didn't catch that, can you repeat?";
++      try {
++        const tts = await synthesizeSpeech(repromptMessage, transcript.language);
++        send(ws, {
++          type: 'reprompt',
++          repromptMessage,
++          audio: tts.audio.toString('base64'),
++          audioMime: tts.mime,
++        });
++      } catch (err) {
++        // TTS is best-effort — never block the reprompt on a Deepgram Speak failure.
++        console.error('TTS synthesis failed, falling back to text-only reprompt:', err);
++        send(ws, { type: 'reprompt', repromptMessage });
++      }
+       break;
++    }
+ 
+     case 'escalate':
+       send(ws, {
+diff --git a/server/src/ttsClient.ts b/server/src/ttsClient.ts
+new file mode 100644
+index 0000000..32ee25e
+--- /dev/null
++++ b/server/src/ttsClient.ts
+@@ -0,0 +1,82 @@
++/**
++ * Deepgram Aura-2 text-to-speech — speaks the Ear's own messages back to the
++ * caller (currently just the low-confidence reprompt: "I didn't catch that,
++ * can you repeat?"). This is the Ear "talking back," separate from Deepgram
++ * STT (deepgramClient.ts), which only listens.
++ *
++ * Aura-2 language coverage is narrower than STT's `language: 'multi'` auto-detect:
++ * English, Spanish, Dutch, French, German, Italian, Japanese only (no Hindi, etc.
++ * as of writing). Since our reprompt text itself is hardcoded English, we pick an
++ * Aura-2 voice for the caller's detected language when one exists and otherwise
++ * just speak the English text with an English voice — never silently fail.
++ */
++
++const DEEPGRAM_SPEAK_URL = 'https://api.deepgram.com/v1/speak';
++
++// One representative Aura-2 voice per supported language. Swap freely —
++// these are just defaults, not a contractual choice.
++const VOICE_BY_LANGUAGE: Record<string, string> = {
++  en: 'aura-2-thalia-en',
++  es: 'aura-2-celeste-es',
++  nl: 'aura-2-rhea-nl',
++  fr: 'aura-2-agathe-fr',
++  de: 'aura-2-viktoria-de',
++  it: 'aura-2-livia-it',
++  ja: 'aura-2-izanami-ja',
++};
++
++const FALLBACK_VOICE = VOICE_BY_LANGUAGE.en;
++
++export type TtsResult = {
++  audio: Buffer; // raw WAV bytes
++  mime: 'audio/wav';
++  model: string;
++};
++
++/**
++ * Pick the closest Aura-2 voice for a Deepgram STT language code
++ * (e.g. 'es', 'es-419', 'hi', 'multi', 'unknown'). Falls back to English
++ * whenever the detected language isn't one Aura-2 speaks.
++ */
++export function pickVoiceModel(sttLanguage: string | undefined): string {
++  if (!sttLanguage) return FALLBACK_VOICE;
++  const base = sttLanguage.split('-')[0].toLowerCase();
++  return VOICE_BY_LANGUAGE[base] ?? FALLBACK_VOICE;
++}
++
++/**
++ * Synthesize `text` with Aura-2 and return the raw audio bytes (WAV).
++ * Throws on any non-2xx response or network error — callers should catch
++ * this and fall back to text-only delivery rather than let it crash a session.
++ */
++export async function synthesizeSpeech(
++  text: string,
++  sttLanguage?: string
++): Promise<TtsResult> {
++  const apiKey = process.env.DEEPGRAM_API_KEY;
++  if (!apiKey) {
++    throw new Error(
++      'DEEPGRAM_API_KEY is not set. Copy .env.example to .env and add your key.'
++    );
++  }
++
++  const model = pickVoiceModel(sttLanguage);
++  const url = `${DEEPGRAM_SPEAK_URL}?model=${encodeURIComponent(model)}`;
++
++  const res = await fetch(url, {
++    method: 'POST',
++    headers: {
++      Authorization: `Token ${apiKey}`,
++      'Content-Type': 'application/json',
++    },
++    body: JSON.stringify({ text }),
++  });
++
++  if (!res.ok) {
++    const body = await res.text().catch(() => '<unreadable body>');
++    throw new Error(`Deepgram TTS request failed: ${res.status} ${res.statusText} — ${body}`);
++  }
++
++  const arrayBuffer = await res.arrayBuffer();
++  return { audio: Buffer.from(arrayBuffer), mime: 'audio/wav', model };
++}
+diff --git a/server/src/types.ts b/server/src/types.ts
+index c434635..47856d5 100644
+--- a/server/src/types.ts
++++ b/server/src/types.ts
+@@ -32,7 +32,7 @@ export type EarToClientMessage =
+   | { type: 'session_end'; sessionId?: string }
+   | { type: 'interim_transcript'; transcript: WireTranscript }
+   | { type: 'final_transcript'; transcript: WireTranscript }
+-  | { type: 'reprompt'; repromptMessage: string }
++  | { type: 'reprompt'; repromptMessage: string; audio?: string; audioMime?: string }
+   | { type: 'escalation'; escalate: 'human' | '911'; escalationReason?: string }
+   | { type: 'status'; message: string };
+ 
+-- 
+2.34.1
+

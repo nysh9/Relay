@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { openDeepgramConnection } from './deepgramClient';
 import { SessionManager } from './sessionManager';
 import { fakeBrainProcess } from './brainStub';
+import { synthesizeSpeech } from './ttsClient';
 import { streamBackupClip } from './backupAudio';
 import { ClientToEarMessage, EarToClientMessage, Transcript, WireTranscript } from './types';
 import { bufferToArrayBuffer } from './util';
@@ -53,7 +54,7 @@ wss.on('connection', (ws: WebSocket) => {
 
     deepgramConn = openDeepgramConnection({
       onTranscript: (transcript: Transcript) => {
-        handleTranscript(ws, sessionId, transcript);
+        void handleTranscript(ws, sessionId, transcript);
       },
       onUtteranceEnd: () => {
         console.log(`[ear:${sessionId}] utterance end`);
@@ -112,7 +113,7 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-function handleTranscript(ws: WebSocket, sessionId: string, transcript: Transcript) {
+async function handleTranscript(ws: WebSocket, sessionId: string, transcript: Transcript) {
   // Enrich the internal transcript into the frontend's WireTranscript shape.
   const wire: WireTranscript = {
     sessionId,
@@ -137,12 +138,23 @@ function handleTranscript(ws: WebSocket, sessionId: string, transcript: Transcri
       void fakeBrainProcess(transcript);
       break;
 
-    case 'reprompt':
-      send(ws, {
-        type: 'reprompt',
-        repromptMessage: "I didn't catch that, can you repeat?",
-      });
+    case 'reprompt': {
+      const repromptMessage = "I didn't catch that, can you repeat?";
+      try {
+        const tts = await synthesizeSpeech(repromptMessage, transcript.language);
+        send(ws, {
+          type: 'reprompt',
+          repromptMessage,
+          audio: tts.audio.toString('base64'),
+          audioMime: tts.mime,
+        });
+      } catch (err) {
+        // TTS is best-effort — never block the reprompt on a Deepgram Speak failure.
+        console.error('TTS synthesis failed, falling back to text-only reprompt:', err);
+        send(ws, { type: 'reprompt', repromptMessage });
+      }
       break;
+    }
 
     case 'escalate':
       send(ws, {
