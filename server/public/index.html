@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>RELAY — Ear test harness</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; color: #222; }
+  h1 { font-size: 18px; }
+  #status { color: #666; margin-bottom: 12px; }
+  #transcript { border: 1px solid #ddd; border-radius: 8px; padding: 12px; height: 200px; overflow-y: auto; background: #fafafa; }
+  .line.interim { color: #999; }
+  .line.final { color: #111; font-weight: 500; }
+  .banner { margin-top: 12px; padding: 10px; border-radius: 8px; display: none; }
+  .banner.warn { background: #fff4d6; color: #8a6500; display: block; }
+  .banner.escalate { background: #ffe1e1; color: #a30000; display: block; }
+  button { margin-right: 8px; padding: 8px 14px; }
+</style>
+</head>
+<body>
+  <h1>RELAY — Ear test harness (Person A)</h1>
+  <p>Not the real demo UI — Person D ports the actual design. This page exists to prove
+     mic → WS → Deepgram → transcript works end-to-end on its own.</p>
+
+  <div id="status">idle</div>
+
+  <p style="font-size: 13px; color: #888; margin: 4px 0 12px;">
+    Language is detected automatically per utterance (Deepgram nova-3
+    multilingual mode) — no language picker needed. Each transcript line
+    below is tagged with the language Deepgram detected for it.
+  </p>
+
+  <button id="btnStart">Start (mic)</button>
+  <button id="btnStop" disabled>Stop</button>
+  <button id="btnBackupClip">Use backup clip</button>
+
+  <div id="transcript"></div>
+  <div id="banner" class="banner"></div>
+
+  <script src="client.js"></script>
+</body>
+</html>

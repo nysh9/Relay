@@ -1,0 +1,25 @@
+{
+  "name": "relay-ear",
+  "version": "0.1.0",
+  "description": "RELAY — Person A: The Ear (Audio + WebSocket + Deepgram streaming STT for Hindi)",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc -p .",
+    "start": "node dist/server.js",
+    "backup-clip": "ts-node src/backupAudio.ts"
+  },
+  "dependencies": {
+    "@deepgram/sdk": "^3.9.0",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "@types/ws": "^8.5.10",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.5.3"
+  }
+}
