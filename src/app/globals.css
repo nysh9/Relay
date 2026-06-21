@@ -1,6 +1,14 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 entrypoint (this project is on tailwindcss@4 + @tailwindcss/postcss). */
+@import "tailwindcss";
+
+/* Mapbox GL CSS — required for map controls/popups. CSS @import must come
+   before any other rules, so keep these imports at the very top. */
+@import "mapbox-gl/dist/mapbox-gl.css";
+
+/* Load the legacy JS theme (relay-* / priority-* / escalation-* colors,
+   animations). Tailwind v4 does not auto-read tailwind.config.ts — this
+   directive opts back in so the custom brand utilities are generated. */
+@config "../../tailwind.config.ts";
 
 /* ── Base ───────────────────────────────────────────────────────────────────── */
 
@@ -14,9 +22,6 @@ body {
   background: #0A0E1A;
   color: #e5e7eb;
 }
-
-/* Mapbox GL CSS — required for the map to render correctly */
-@import "mapbox-gl/dist/mapbox-gl.css";
 
 /* ── Scrollbar ──────────────────────────────────────────────────────────────── */
 
