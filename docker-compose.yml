@@ -1,0 +1,23 @@
+# RELAY — local Redis Stack (Redis + Query Engine for vector search).
+#
+# This is what makes "Redis beyond caching" work: redis-stack-server bundles
+# the RediSearch module the Matchmaker uses for KNN vector recall, and the Brain
+# uses the same instance for per-session agent memory with TTL.
+#
+#   docker compose up -d redis     # start
+#   redis-cli ping                 # -> PONG
+#   docker compose down            # stop
+#
+# Data is intentionally NOT persisted to a volume — session memory is per-call
+# and wiped (§2 privacy), and resources are reseeded by the matchmaker on boot.
+services:
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: relay-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
