@@ -22,6 +22,19 @@ function showBanner(text, kind) {
   elBanner.style.display = text ? 'block' : 'none';
 }
 
+function playBase64Audio(base64, mime) {
+  try {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.addEventListener('ended', () => URL.revokeObjectURL(url));
+    void audio.play().catch((err) => console.error('Reprompt audio playback failed:', err));
+  } catch (err) {
+    console.error('Failed to decode reprompt audio:', err);
+  }
+}
+
 function appendTranscriptLine(text, isFinal, language) {
   const last = elTranscript.lastElementChild;
   if (last && last.dataset.interim === 'true') {
@@ -67,6 +80,9 @@ async function start() {
         break;
       case 'reprompt':
         showBanner(msg.repromptMessage, 'warn');
+        if (msg.audio) {
+          playBase64Audio(msg.audio, msg.audioMime || 'audio/wav');
+        }
         break;
       case 'escalation':
         showBanner(
