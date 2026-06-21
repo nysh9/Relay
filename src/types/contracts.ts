@@ -73,8 +73,10 @@ export interface Triage {
   /** Fields Brain still needs before routing */
   missingFields: Array<"location" | "numberOfPeople" | "natureOfEmergency" | "needs">;
 
-  /** Hindi question Brain wants the operator/TTS to ask next */
+  /** Question (in the CALLER's language) Brain wants asked next, for TTS + display */
   nextQuestion: string | null;
+  /** English translation of nextQuestion, for the operator subtitle */
+  nextQuestionEnglish: string | null;
 
   /** True only when all critical slots are filled and priority is set */
   readyToRoute: boolean;
@@ -111,11 +113,21 @@ export type SessionStatus =
   | "escalated"  // escalate: "911" or "human" triggered
   | "closed";    // call ended, session wiped from Redis
 
+/** A spoken-back turn from RELAY to the caller (the agent asking for more info). */
+export interface AgentPrompt {
+  text: string;            // in the caller's language (what gets spoken)
+  textEnglish: string | null; // English translation, shown as a subtitle
+  language: string;        // BCP-47 code of `text`, e.g. "es" / "hi"
+  timestamp: number;       // ms epoch — used to interleave with caller transcripts
+}
+
 export interface Session {
   sessionId: string;
   startTime: number;
   status: SessionStatus;
   transcripts: Transcript[];
+  /** RELAY's spoken-back questions, interleaved with transcripts in the UI. */
+  agentPrompts: AgentPrompt[];
   triage: Triage | null;
   dispatch: Dispatch | null;
 }

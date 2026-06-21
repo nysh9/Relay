@@ -23,7 +23,8 @@ export type Triage = {
   needs: string[];                 // e.g. ["water", "shelter", "medical"]
   priority: "P1" | "P2" | "P3";  // Claude emits this in core; classifier replaces in stretch
   missingFields: string[];         // required slots still empty, e.g. ["location"]
-  nextQuestion: string | null;     // follow-up to ask if a critical field is missing
+  nextQuestion: string | null;     // follow-up to ask, in the CALLER's language (for TTS)
+  nextQuestionEnglish: string | null; // English translation of nextQuestion (operator subtitle)
   readyToRoute: boolean;           // true only when all required slots are filled
   escalate: "none" | "human" | "911";
 };
@@ -64,8 +65,9 @@ export type Session = {
 
 // POST /triage request body
 export type TriageRequest = {
-  transcript: string;   // raw Hindi text from the Ear
+  transcript: string;   // raw transcript text from the Ear
   sessionId: string;    // caller's session ID
+  language?: string;    // BCP-47 code detected by Deepgram (e.g. "es", "hi"); drives nextQuestion language
 };
 
 // POST /triage response

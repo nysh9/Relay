@@ -56,7 +56,7 @@ export default function Page() {
     runMockDemo,
   } = useRelay();
 
-  const { triage, dispatch, transcripts, status } = session;
+  const { triage, dispatch, transcripts, agentPrompts, status } = session;
   const escalate = triage?.escalate ?? null;
   const priority = triage?.priority ?? null;
 
@@ -128,6 +128,7 @@ export default function Page() {
           >
             <TranscriptPanel
               transcripts={transcripts}
+              agentPrompts={agentPrompts}
               repromptMessage={repromptMessage}
               isListening={status === "listening"}
             />

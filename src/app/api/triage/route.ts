@@ -28,6 +28,7 @@ type BrainTriage = {
   priority: "P1" | "P2" | "P3";
   missingFields: string[];
   nextQuestion: string | null;
+  nextQuestionEnglish: string | null;
   readyToRoute: boolean;
   escalate: "none" | "human" | "911";
 };
@@ -65,6 +66,7 @@ function adaptBrainTriage(b: BrainTriage, sessionId: string): Triage {
       .map(mapMissingField)
       .filter((f): f is Triage["missingFields"][number] => f !== null),
     nextQuestion: b.nextQuestion,
+    nextQuestionEnglish: b.nextQuestionEnglish ?? null,
     readyToRoute: b.readyToRoute,
     escalate: b.escalate === "none" ? null : b.escalate,
     updatedAt: Date.now(),
@@ -73,9 +75,10 @@ function adaptBrainTriage(b: BrainTriage, sessionId: string): Triage {
 
 export async function POST(req: NextRequest) {
   try {
-    const { transcript, sessionId } = (await req.json()) as {
+    const { transcript, sessionId, language } = (await req.json()) as {
       transcript?: string;
       sessionId?: string;
+      language?: string;
     };
 
     if (!transcript || !sessionId) {
@@ -88,7 +91,7 @@ export async function POST(req: NextRequest) {
     const upstream = await fetch(`${BRAIN_URL}/triage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript, sessionId }),
+      body: JSON.stringify({ transcript, sessionId, language }),
     });
 
     if (!upstream.ok) {

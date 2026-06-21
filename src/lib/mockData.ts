@@ -63,6 +63,7 @@ export const MOCK_TRIAGE: Triage = {
   priority: "P2",
   missingFields: [],
   nextQuestion: null,
+  nextQuestionEnglish: null,
   readyToRoute: true,
   escalate: null,
   updatedAt: Date.now() - 4000,
@@ -84,6 +85,7 @@ export const MOCK_SESSION: Session = {
   startTime: Date.now() - 15000,
   status: "dispatched",
   transcripts: MOCK_TRANSCRIPTS,
+  agentPrompts: [],
   triage: MOCK_TRIAGE,
   dispatch: MOCK_DISPATCH,
 };
