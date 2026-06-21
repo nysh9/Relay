@@ -39,6 +39,8 @@ yarn-error.log*
 .env.local
 .env*.local
 brain/.env
+# …but DO track the placeholder example (no real secrets in it)
+!.env.example
 
 # vercel
 .vercel
@@ -53,6 +55,11 @@ brain/dist/
 
 # matchmaker node deps
 matchmaker/node_modules/
+
+# classifier (Python) — venv + model binary are regenerable; keep data.csv + png
+classifier/.venv/
+classifier/__pycache__/
+classifier/*.pkl
 
 # editor
 .vscode/

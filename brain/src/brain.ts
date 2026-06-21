@@ -5,6 +5,49 @@ const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// ─── Trained urgency classifier (stretch §9) ─────────────────────────────────
+// A small TF-IDF + LogisticRegression model (Python/FastAPI, classifier/) rates
+// P1/P2/P3 from triage text. We take the MORE SEVERE of (Claude, classifier) so
+// a measured model can only ever round urgency UP — the over-escalation bias of
+// §2 ("a false alarm is safer than a missed emergency"). If the classifier is
+// down or slow, we silently keep Claude's priority — it must never break triage.
+const CLASSIFIER_URL = process.env.CLASSIFIER_URL ?? 'http://localhost:8000';
+const CLASSIFIER_ENABLED = process.env.CLASSIFIER_ENABLED !== 'false';
+
+const SEVERITY: Record<string, number> = { P1: 3, P2: 2, P3: 1 };
+
+/** Return whichever priority is more urgent (P1 > P2 > P3). Ties keep `a`. */
+export function moreSevere(a: Triage['priority'], b: Triage['priority']): Triage['priority'] {
+  return (SEVERITY[a] ?? 0) >= (SEVERITY[b] ?? 0) ? a : b;
+}
+
+/**
+ * Ask the trained classifier to rate a piece of triage text. Returns null on any
+ * failure (disabled, unreachable, timeout, bad response) so callers fall back to
+ * Claude's priority. Bounded by a short timeout — the classifier is an
+ * enhancement, not a dependency on the live path.
+ */
+export async function classifyPriority(
+  text: string
+): Promise<{ priority: 'P1' | 'P2' | 'P3'; confidence: number } | null> {
+  if (!CLASSIFIER_ENABLED) return null;
+  try {
+    const res = await fetch(`${CLASSIFIER_URL}/classify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { priority: 'P1' | 'P2' | 'P3'; confidence: number };
+    if (data.priority !== 'P1' && data.priority !== 'P2' && data.priority !== 'P3') return null;
+    return data;
+  } catch {
+    // Classifier unavailable — keep Claude's priority. Never breaks triage.
+    return null;
+  }
+}
+
 export async function runBrain(
   transcript: string,
   existing: Partial<Triage>,
@@ -74,5 +117,19 @@ Return the updated triage JSON now.`;
   if (parsed.readyToRoute) {
     parsed.nextQuestion = null;
   }
+
+  // Trained classifier rates urgency independently; take the MORE SEVERE of the
+  // two (over-escalation bias §2). Classifier down/slow → keep Claude's priority.
+  const clfText = `${parsed.summary} ${parsed.transcriptEnglish} needs: ${parsed.needs.join(', ')}`;
+  const clf = await classifyPriority(clfText);
+  if (clf) {
+    const finalPriority = moreSevere(parsed.priority, clf.priority);
+    console.log(
+      `[brain] priority — claude=${parsed.priority} ` +
+        `classifier=${clf.priority}(${clf.confidence.toFixed(2)}) → ${finalPriority}`
+    );
+    parsed.priority = finalPriority;
+  }
+
   return parsed;
 }
