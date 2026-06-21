@@ -46,6 +46,14 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/dispatch/, '/dispatch'),
       },
+      // RELAY speaks its follow-up questions aloud. The Next app's /api/speak
+      // route does Deepgram Aura TTS (en/es) and returns 415 for other languages
+      // so the client falls back to the browser voice. Next dev server default
+      // is :3000 — override with the SPEAK target if yours runs elsewhere.
+      '/api/speak': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
     },
   },
 
