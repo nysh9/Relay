@@ -15,7 +15,7 @@
  *  - Audio processing (that's useMic)
  */
 
-import { useCallback, useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import type {
   Dispatch as RelayDispatch,
   EscalateTarget,
@@ -194,6 +194,55 @@ export function useRelay(): UseRelayReturn {
     isDemoMode,
   });
 
+  // ── Triage → Dispatch pipeline ─────────────────────────────────────────────
+  // On every FINAL transcript we run the rest of the pipeline:
+  //   transcript → /api/triage (Brain/Claude) → /api/dispatch (Matchmaker).
+  // Both API routes adapt their backend's shape into the frontend contract, and
+  // we feed the results into the reducer so the TriageCard, DispatchPanel and
+  // map light up. Errors are logged but never crash the call.
+  const runPipeline = useCallback(async (text: string, sessionId: string) => {
+    try {
+      const triageRes = await fetch("/api/triage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ transcript: text, sessionId }),
+      });
+      if (!triageRes.ok) {
+        console.error("[RELAY] /api/triage failed:", triageRes.status);
+        return;
+      }
+      const triage: Triage = await triageRes.json();
+      dispatch({ type: "TRIAGE_UPDATE", triage });
+
+      if (triage.escalate) {
+        dispatch({ type: "ESCALATION", escalate: triage.escalate });
+        return; // escalation beats routing — don't send a 911/human case to a shelter
+      }
+
+      if (!triage.readyToRoute || !triage.location || triage.needs.length === 0) {
+        return; // Brain still gathering info — wait for the next utterance
+      }
+
+      const dispatchRes = await fetch("/api/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          needs: triage.needs,
+          location: triage.location,
+          sessionId,
+        }),
+      });
+      if (!dispatchRes.ok) {
+        console.error("[RELAY] /api/dispatch failed:", dispatchRes.status);
+        return;
+      }
+      const dispatchResult: RelayDispatch = await dispatchRes.json();
+      dispatch({ type: "DISPATCH", dispatch: dispatchResult });
+    } catch (err) {
+      console.error("[RELAY] pipeline error:", err);
+    }
+  }, []);
+
   // ── WS message handler ─────────────────────────────────────────────────────
 
   const handleWsMessage = useCallback(
@@ -210,8 +259,12 @@ export function useRelay(): UseRelayReturn {
             dispatch({ type: "INTERIM_TRANSCRIPT", transcript: msg.transcript });
           break;
         case "final_transcript":
-          if (msg.transcript)
+          if (msg.transcript) {
             dispatch({ type: "FINAL_TRANSCRIPT", transcript: msg.transcript });
+            // Kick off the rest of the pipeline with the transcript's own
+            // sessionId (the server stamps it on every WireTranscript).
+            void runPipeline(msg.transcript.text, msg.transcript.sessionId);
+          }
           break;
         case "triage_update":
           if (msg.triage)
@@ -238,7 +291,7 @@ export function useRelay(): UseRelayReturn {
           console.warn("[RELAY] Unknown WS message type:", msg.type);
       }
     },
-    []
+    [runPipeline]
   );
 
   // ── WS connection ──────────────────────────────────────────────────────────
@@ -253,7 +306,10 @@ export function useRelay(): UseRelayReturn {
       autoConnect: !isDemoMode,
     });
 
-  // Sync WS status into relay state
+  // Sync WS status into relay state. Also mirror it into a ref so startCall can
+  // wait for the socket to actually be OPEN before sending control messages.
+  const wsStatusRef = useRef<WsStatus>(wsStatus);
+  wsStatusRef.current = wsStatus;
   useEffect(() => {
     dispatch({ type: "WS_STATUS", status: wsStatus });
   }, [wsStatus]);
@@ -270,9 +326,33 @@ export function useRelay(): UseRelayReturn {
 
   const startCall = useCallback(async () => {
     if (isDemoMode) return;
-    connect();
-    await startMic();
-    sendJson({ type: "session_start" });
+
+    // Flip the UI to "listening" instantly — don't wait on a server round-trip
+    // that can be lost if the socket isn't open yet. The real sessionId from the
+    // server arrives on its session_start echo (and on every transcript).
+    dispatch({
+      type: "SESSION_START",
+      sessionId:
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `web-${Date.now()}`,
+    });
+
+    connect(); // no-op if autoConnect already opened it
+    await startMic(); // mic on; the server starts Deepgram on the first audio chunk
+
+    // Send session_start once the socket is actually OPEN, retrying briefly.
+    // If it's already open this fires immediately; otherwise it waits for the
+    // connection without ever silently dropping the message.
+    let attempts = 0;
+    const sendSessionStart = () => {
+      if (wsStatusRef.current === "open") {
+        sendJson({ type: "session_start" });
+      } else if (attempts++ < 25) {
+        setTimeout(sendSessionStart, 150); // ~3.75s of grace
+      }
+    };
+    sendSessionStart();
   }, [isDemoMode, connect, startMic, sendJson]);
 
   const endCall = useCallback(() => {
