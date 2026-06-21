@@ -97,7 +97,7 @@ app.post('/triage', async (req: Request, res: Response) => {
   }
 
   // 1. Load whatever we already know about this caller from earlier utterances.
-  const existingPartial = getSession(sessionId);
+  const existingPartial = await getSession(sessionId);
 
   // 2. Ask Claude to read the new transcript in context of what we know already.
   //    runBrain returns a *complete* Triage (all required keys present, nulls
@@ -115,12 +115,12 @@ app.post('/triage', async (req: Request, res: Response) => {
 
   // 3. Merge the fresh Triage into session memory. This means a second
   //    utterance can fill in `location` that was missing from the first.
-  updateSession(sessionId, freshTriage);
+  await updateSession(sessionId, freshTriage);
 
   // 4. Read back the merged state — this is what we return, not just
   //    freshTriage, because merging may have preserved fields from earlier
   //    utterances that Claude didn't re-extract this time.
-  const mergedTriage = getSession(sessionId) as Triage; // safe: freshTriage guarantees all keys
+  const mergedTriage = (await getSession(sessionId)) as Triage; // safe: freshTriage guarantees all keys
 
   const response: TriageResponse = { triage: mergedTriage, sessionId, transcript };
   res.json(response);
@@ -134,7 +134,7 @@ app.post('/triage', async (req: Request, res: Response) => {
  * Body: { sessionId: string }
  * Response: { ok: true }
  */
-app.post('/session/clear', (req: Request, res: Response) => {
+app.post('/session/clear', async (req: Request, res: Response) => {
   const { sessionId } = req.body as { sessionId: string };
 
   if (!sessionId) {
@@ -142,7 +142,7 @@ app.post('/session/clear', (req: Request, res: Response) => {
     return;
   }
 
-  clearSession(sessionId);
+  await clearSession(sessionId);
   res.json({ ok: true });
 });
 
