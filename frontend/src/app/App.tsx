@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 import { Phone, ZoomIn, ZoomOut, Home, Droplets, HeartPulse, Navigation, Clock, CheckCircle2, PhoneOff, X } from "lucide-react"
+import { useRelayLive, type UiResource, type Turn, type TriageData, type ResourceType } from "./useRelayLive"
 
 // ─── Color Palette (PNG_image-1.png — strict) ────────────────────────────────
 // Color 1: Minted Eucalyptus | Color 2: Seaglass Veil | Color 3: Peach Blushlight
@@ -33,77 +34,6 @@ const C = {
   medicalBg:  "#fdeadf",
   caller:     "#e8a84a",   // Golden Nectar
 }
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-type ResourceType = "shelter" | "medical" | "water"
-type AppStage = "ringing" | "listening" | "matched"
-
-interface Resource {
-  id: string; name: string; type: ResourceType
-  lat: number; lng: number; capacity: number; remaining: number
-  address: string; has: string[]; distanceKm: number; driveMin: number; note: string
-}
-
-interface Turn {
-  speaker: "caller" | "relay"
-  text: string
-  translation?: string
-}
-
-// ─── Data ─────────────────────────────────────────────────────────────────────
-const CALLER_LAT = 29.7387, CALLER_LNG = -95.4162
-
-function hkm(la1: number, lo1: number, la2: number, lo2: number) {
-  const R = 6371, dl = ((la2-la1)*Math.PI)/180, dg = ((lo2-lo1)*Math.PI)/180
-  const a = Math.sin(dl/2)**2 + Math.cos(la1*Math.PI/180)*Math.cos(la2*Math.PI/180)*Math.sin(dg/2)**2
-  return Math.round(R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))*10)/10
-}
-
-const RAW = [
-  { id:"lakewood", name:"Lakewood Church Community Hub", type:"shelter" as ResourceType, lat:29.7214, lng:-95.4423, cap:320,  rem:87,  addr:"3700 Southwest Fwy",          has:["shelter","water","food"],          note:"87 beds · water on-site · fits family of 4" },
-  { id:"nrg",      name:"NRG Center Mega-Shelter",        type:"shelter" as ResourceType, lat:29.6836, lng:-95.4097, cap:2400, rem:612, addr:"NRG Pkwy, Houston TX 77054",   has:["shelter","water","medical","food"], note:"612 beds · full services · medical staff" },
-  { id:"grb",      name:"GRB Convention Center",          type:"shelter" as ResourceType, lat:29.7533, lng:-95.3654, cap:850,  rem:203, addr:"1001 Avenida de las Americas", has:["shelter","water","food"],          note:"203 beds · no medical staff on site" },
-  { id:"bentaub",  name:"Ben Taub General Hospital",      type:"medical" as ResourceType, lat:29.7118, lng:-95.3997, cap:60,   rem:14,  addr:"1504 Taub Loop",               has:["medical","water"],                 note:"ER open · 14 beds remaining" },
-  { id:"txch",     name:"Texas Children's Hospital",      type:"medical" as ResourceType, lat:29.7068, lng:-95.3993, cap:40,   rem:8,   addr:"6621 Fannin St",               has:["medical","water"],                 note:"Pediatric focus · nearly at capacity" },
-  { id:"bbwater",  name:"Buffalo Bayou Water Dist.",       type:"water"   as ResourceType, lat:29.7519, lng:-95.3862, cap:5000, rem:3200,addr:"Memorial Dr & Shepherd Dr",    has:["water"],                           note:"Drive-through water pickup only" },
-  { id:"heights",  name:"Heights Water Station",           type:"water"   as ResourceType, lat:29.7925, lng:-95.4008, cap:3000, rem:1820,addr:"1415 N Shepherd Dr",           has:["water"],                           note:"Open until 10 pm" },
-  { id:"humble",   name:"Humble Civic Center",             type:"shelter" as ResourceType, lat:29.9988, lng:-95.2627, cap:180,  rem:45,  addr:"8233 Will Clayton Pkwy",       has:["shelter","water"],                 note:"45 beds · farther out but available" },
-]
-const RESOURCES: Resource[] = RAW.map(r => ({
-  id:r.id, name:r.name, type:r.type, lat:r.lat, lng:r.lng,
-  capacity:r.cap, remaining:r.rem, address:r.addr, has:r.has, note:r.note,
-  distanceKm: hkm(CALLER_LAT,CALLER_LNG,r.lat,r.lng),
-  driveMin: Math.round((hkm(CALLER_LAT,CALLER_LNG,r.lat,r.lng)/28)*60),
-}))
-const MATCHES = RESOURCES.filter(r=>r.type==="shelter"&&r.remaining>30).sort((a,b)=>a.distanceKm-b.distanceKm).slice(0,3)
-
-// ─── Conversation turns with translations ─────────────────────────────────────
-const TURNS_DATA: (Turn & { speakMs: number })[] = [
-  { speaker:"caller", text:"नमस्ते, हमें मदद चाहिए! हम Montrose area में बाढ़ में फंसे हुए हैं। हमें पानी और आश्रय की जरूरत है।",
-    translation:"Hello, we need help! We are trapped in flooding in the Montrose area. We need water and shelter.", speakMs:3800 },
-  { speaker:"relay",  text:"I understand — you need water and shelter. How many people are with you? Any injuries?", speakMs:0 },
-  { speaker:"caller", text:"हमारे साथ 4 लोग हैं — 2 बड़े और 2 बच्चे। कोई चोट नहीं है।",
-    translation:"There are 4 of us — 2 adults and 2 children. No one is injured.", speakMs:2600 },
-  { speaker:"relay",  text:"Understood — family of 4, no injuries. Can you describe your exact location?", speakMs:0 },
-  { speaker:"caller", text:"हम Westheimer Road के पास हैं, Kirby Drive के नजदीक। पानी बहुत तेज बढ़ रहा है।",
-    translation:"We are near Westheimer Road, close to Kirby Drive. The water is rising very fast.", speakMs:3200 },
-  { speaker:"relay",  text:"Got it — near Westheimer & Kirby. Locating the nearest shelter with water now.", speakMs:0 },
-]
-
-// ─── Agent process steps ──────────────────────────────────────────────────────
-const AGENT_STEPS = [
-  { t:0,  text:"Deepgram STT connected · Streaming audio..." },
-  { t:2,  text:"Language detected: Hindi (hi) · Confidence 0.94" },
-  { t:5,  text:"Claude reading utterance 1 · Extracting triage fields..." },
-  { t:7,  text:"Triage field: needs = ['shelter', 'water']" },
-  { t:9,  text:"Claude reading utterance 2 · People count..." },
-  { t:11, text:"Triage field: people = 4, children = 2" },
-  { t:13, text:"Location geocoded → 29.7387, -95.4162 (Montrose)" },
-  { t:15, text:"Matchmaker running · Redis vector search..." },
-  { t:16, text:"4 shelter candidates ranked by distance + capacity" },
-  { t:18, text:"Match: Lakewood Church Hub · 3.2 km · 87 beds" },
-  { t:19, text:"Dispatch issued → Human operator notified ✓" },
-]
 
 // ─── OSRM road routing ────────────────────────────────────────────────────────
 async function fetchRoute(fLa:number,fLo:number,tLa:number,tLo:number): Promise<[number,number][]> {
@@ -141,45 +71,59 @@ function makeCallerIcon(){
   })
 }
 
-// ─── MapPanel (imperative Leaflet) ────────────────────────────────────────────
-function MapPanel({selectedId,callerVisible,onResourceClick,matchIds}:{
-  selectedId:string|null;callerVisible:boolean;onResourceClick:(id:string)=>void;matchIds:string[]
+// ─── MapPanel (imperative Leaflet, data-driven) ───────────────────────────────
+function MapPanel({resources,callerLatLng,selectedId,onResourceClick,matchIds}:{
+  resources:UiResource[];callerLatLng:[number,number]|null;selectedId:string|null;onResourceClick:(id:string)=>void;matchIds:string[]
 }){
   const cRef=useRef<HTMLDivElement>(null),mapR=useRef<L.Map|null>(null)
   const mks=useRef<Map<string,L.Marker>>(new Map())
   const calR=useRef<L.Marker|null>(null),routeR=useRef<L.Polyline|null>(null),prevSel=useRef<string|null>(null)
 
+  // init map once
   useEffect(()=>{
     if(!cRef.current||mapR.current)return
     const map=L.map(cRef.current,{center:[29.76,-95.37],zoom:11,zoomControl:false,attributionControl:false})
     L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",{maxZoom:19}).addTo(map)
-    RESOURCES.forEach(r=>{
-      const m=L.marker([r.lat,r.lng],{icon:makeResourceIcon(r.type,false,matchIds.includes(r.id))}).addTo(map).on("click",()=>onResourceClick(r.id))
-      mks.current.set(r.id,m)
-    })
     mapR.current=map
     return()=>{map.remove();mapR.current=null}
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   },[])
 
-  useEffect(()=>{RESOURCES.forEach(r=>mks.current.get(r.id)?.setIcon(makeResourceIcon(r.type,selectedId===r.id,matchIds.includes(r.id))))},[selectedId,matchIds])
+  // (re)build resource markers whenever the resource set changes
   useEffect(()=>{
-    if(!mapR.current)return
-    if(callerVisible&&!calR.current) calR.current=L.marker([CALLER_LAT,CALLER_LNG],{icon:makeCallerIcon()}).addTo(mapR.current)
-    if(!callerVisible&&calR.current){calR.current.remove();calR.current=null}
-  },[callerVisible])
+    const map=mapR.current;if(!map)return
+    mks.current.forEach(m=>m.remove());mks.current.clear()
+    resources.forEach(r=>{
+      const m=L.marker([r.lat,r.lng],{icon:makeResourceIcon(r.type,selectedId===r.id,matchIds.includes(r.id))}).addTo(map).on("click",()=>onResourceClick(r.id))
+      mks.current.set(r.id,m)
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[resources])
+
+  // selected / match icon refresh
+  useEffect(()=>{resources.forEach(r=>mks.current.get(r.id)?.setIcon(makeResourceIcon(r.type,selectedId===r.id,matchIds.includes(r.id))))},[selectedId,matchIds,resources])
+
+  // caller pin
   useEffect(()=>{
-    if(!mapR.current)return
+    const map=mapR.current;if(!map)return
+    if(callerLatLng){
+      if(calR.current)calR.current.setLatLng(callerLatLng)
+      else calR.current=L.marker(callerLatLng,{icon:makeCallerIcon()}).addTo(map)
+    }else if(calR.current){calR.current.remove();calR.current=null}
+  },[callerLatLng])
+
+  // route caller → selected
+  useEffect(()=>{
+    const map=mapR.current;if(!map)return
     routeR.current?.remove();routeR.current=null
-    if(!callerVisible||!selectedId){if(callerVisible&&!selectedId&&prevSel.current)mapR.current.flyTo([CALLER_LAT,CALLER_LNG],13,{duration:1});prevSel.current=selectedId;return}
-    const r=RESOURCES.find(x=>x.id===selectedId);if(!r)return
-    fetchRoute(CALLER_LAT,CALLER_LNG,r.lat,r.lng).then(pts=>{
+    if(!callerLatLng||!selectedId){if(callerLatLng&&!selectedId&&prevSel.current)map.flyTo(callerLatLng,13,{duration:1});prevSel.current=selectedId;return}
+    const r=resources.find(x=>x.id===selectedId);if(!r)return
+    fetchRoute(callerLatLng[0],callerLatLng[1],r.lat,r.lng).then(pts=>{
       if(!mapR.current)return
       routeR.current=L.polyline(pts,{color:typeColor(r.type),weight:4,opacity:0.85}).addTo(mapR.current)
-      if(selectedId!==prevSel.current){const b=L.latLngBounds([[CALLER_LAT,CALLER_LNG],[r.lat,r.lng]]).pad(0.32);mapR.current.flyToBounds(b,{duration:1.2})}
+      if(selectedId!==prevSel.current){const b=L.latLngBounds([callerLatLng,[r.lat,r.lng]]).pad(0.32);mapR.current.flyToBounds(b,{duration:1.2})}
     })
     prevSel.current=selectedId
-  },[selectedId,callerVisible])
+  },[selectedId,callerLatLng,resources])
 
   return(
     <div className="relative size-full">
@@ -222,8 +166,7 @@ function VoiceBars({speaking}:{speaking:boolean}){
 }
 
 // ─── Brain triage popup (floating over map) ───────────────────────────────────
-interface TriageData { people?:string; medical?:string; needs?:string; location?:string; danger?:string }
-function BrainPopup({triage,priority,onClose}:{triage:TriageData;priority:"P1"|"P2";onClose:()=>void}){
+function BrainPopup({triage,priority,onClose}:{triage:TriageData;priority:"P1"|"P2"|"P3";onClose:()=>void}){
   const rows:[string,keyof TriageData,string?][]=[
     ["PEOPLE","people"],["MEDICAL","medical"],["NEEDS","needs"],["LOCATION","location"],["STATUS","danger",C.poppy],
   ]
@@ -268,7 +211,7 @@ function BrainPopup({triage,priority,onClose}:{triage:TriageData;priority:"P1"|"
 }
 
 // ─── Ear panel — ringing ──────────────────────────────────────────────────────
-function EarRinging({onAnswer}:{onAnswer:()=>void}){
+function EarRinging({onAnswer,micError}:{onAnswer:()=>void;micError:string|null}){
   return(
     <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"40px 28px",gap:24,textAlign:"center"}}>
       {/* Concentric ring animation */}
@@ -291,20 +234,29 @@ function EarRinging({onAnswer}:{onAnswer:()=>void}){
         boxShadow:`0 3px 14px ${C.teal}55`}}>
         Answer the call
       </button>
+      {micError&&(
+        <div style={{fontSize:11,color:C.poppy,maxWidth:230,lineHeight:1.5}}>{micError}</div>
+      )}
     </div>
   )
 }
 
 // ─── Ear panel — listening ────────────────────────────────────────────────────
-function EarListening({turns,activeTurnIdx,speaking}:{turns:Turn[];activeTurnIdx:number|null;speaking:boolean}){
+function EarListening({turns,speaking,langLabel}:{turns:Turn[];speaking:boolean;langLabel:string}){
   const scrollRef=useRef<HTMLDivElement>(null)
   useEffect(()=>{if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight},[turns])
+  const activeTurnIdx=turns.length-1
   return(
     <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div style={{padding:"0 4px 4px",flexShrink:0}}>
         <VoiceBars speaking={speaking}/>
       </div>
       <div ref={scrollRef} style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:8,padding:"8px 12px"}}>
+        {turns.length===0&&(
+          <div style={{padding:"20px 8px",fontSize:12,color:C.inkFaint,fontStyle:"italic",textAlign:"center"}}>
+            Listening… speak into the mic and RELAY will transcribe in any language.
+          </div>
+        )}
         {turns.map((t,i)=>{
           const isActive=activeTurnIdx===i
           const isCaller=t.speaker==="caller"
@@ -320,7 +272,7 @@ function EarListening({turns,activeTurnIdx,speaking}:{turns:Turn[];activeTurnIdx
                 {/* Label */}
                 <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",
                   color:isCaller?C.poppy:C.teal,marginBottom:4}}>
-                  {isCaller?"CALLER · hi":"RELAY"}
+                  {isCaller?`CALLER · ${langLabel}`:"RELAY"}
                 </div>
                 {/* Original text */}
                 <div style={{fontSize:11.5,lineHeight:1.55,color:C.ink,
@@ -349,7 +301,7 @@ function EarListening({turns,activeTurnIdx,speaking}:{turns:Turn[];activeTurnIdx
 }
 
 // ─── Matchmaker panel ─────────────────────────────────────────────────────────
-function MatchmakerPanel({selectedId,onSelect}:{selectedId:string|null;onSelect:(id:string)=>void}){
+function MatchmakerPanel({matches,triage,selectedId,onSelect}:{matches:UiResource[];triage:TriageData;selectedId:string|null;onSelect:(id:string)=>void}){
   const typeIcon=(t:string)=>t==="shelter"?<Home size={10}/>:t==="water"?<Droplets size={10}/>:<HeartPulse size={10}/>
   const tagColor=(t:string)=>t==="shelter"?C.shelter:t==="water"?C.water:t==="medical"?C.medical:C.amber
   const tagBg=(t:string)=>t==="shelter"?C.shelterBg:t==="water"?C.waterBg:t==="medical"?C.medicalBg:"#fef3c7"
@@ -357,7 +309,7 @@ function MatchmakerPanel({selectedId,onSelect}:{selectedId:string|null;onSelect:
   return(
     <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div style={{flex:1,overflowY:"auto",padding:"12px 14px",display:"flex",flexDirection:"column",gap:14}}>
-        {MATCHES.map((r,i)=>{
+        {matches.map((r,i)=>{
           const sel=selectedId===r.id
           const col=typeColor(r.type)
           return(
@@ -402,7 +354,7 @@ function MatchmakerPanel({selectedId,onSelect}:{selectedId:string|null;onSelect:
               <div style={{display:"flex",alignItems:"center",gap:8}}>
                 <div style={{flex:1,height:5,borderRadius:3,background:"rgba(139,59,40,0.1)"}}>
                   <div style={{height:"100%",borderRadius:3,background:col,
-                    width:`${Math.round(r.remaining/r.capacity*100)}%`,transition:"width 0.4s ease"}}/>
+                    width:`${Math.round(r.remaining/Math.max(1,r.capacity)*100)}%`,transition:"width 0.4s ease"}}/>
                 </div>
                 <span style={{fontSize:10,fontFamily:"JetBrains Mono,monospace",color:C.inkSoft,flexShrink:0}}>{r.remaining}/{r.capacity}</span>
               </div>
@@ -419,25 +371,27 @@ function MatchmakerPanel({selectedId,onSelect}:{selectedId:string|null;onSelect:
       </div>
 
       {/* Dispatch highlight box */}
-      <div style={{margin:"0 14px 14px",borderRadius:12,overflow:"hidden",flexShrink:0,
-        boxShadow:"0 2px 12px rgba(139,59,40,0.18)"}}>
-        <div style={{background:C.rust,padding:"12px 16px"}}>
-          <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.12em",color:"rgba(255,249,243,0.6)",marginBottom:5}}>
-            DISPATCH ISSUED · HANDED TO A HUMAN RESPONDER
+      {matches[0]&&(
+        <div style={{margin:"0 14px 14px",borderRadius:12,overflow:"hidden",flexShrink:0,
+          boxShadow:"0 2px 12px rgba(139,59,40,0.18)"}}>
+          <div style={{background:C.rust,padding:"12px 16px"}}>
+            <div style={{fontSize:9,fontWeight:700,letterSpacing:"0.12em",color:"rgba(255,249,243,0.6)",marginBottom:5}}>
+              DISPATCH ISSUED · HANDED TO A HUMAN RESPONDER
+            </div>
+            <div style={{fontSize:12,fontWeight:600,color:"#fff9f3",lineHeight:1.6}}>
+              {[triage.people,triage.needs].filter(Boolean).join(" · ")||"Mass-care request"}
+            </div>
+            <div style={{fontSize:12,fontWeight:500,color:C.tealLight,lineHeight:1.6}}>
+              → {matches[0].name} — {matches[0].distanceKm} km
+            </div>
           </div>
-          <div style={{fontSize:12,fontWeight:600,color:"#fff9f3",lineHeight:1.6}}>
-            Family of 4 · water + shelter needed
-          </div>
-          <div style={{fontSize:12,fontWeight:500,color:C.tealLight,lineHeight:1.6}}>
-            → {MATCHES[0]?.name} — {MATCHES[0]?.distanceKm} km
+          <div style={{background:"#f0e2d0",padding:"9px 16px"}}>
+            <div style={{fontSize:10,fontStyle:"italic",color:C.inkSoft,lineHeight:1.5}}>
+              A real responder confirms before anyone is moved. RELAY never closes the loop alone.
+            </div>
           </div>
         </div>
-        <div style={{background:"#f0e2d0",padding:"9px 16px"}}>
-          <div style={{fontSize:10,fontStyle:"italic",color:C.inkSoft,lineHeight:1.5}}>
-            A real responder confirms before anyone is moved. RELAY never closes the loop alone.
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   )
 }
@@ -469,90 +423,28 @@ function AgentLog({steps}:{steps:string[]}){
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App(){
-  const [stage,       setStage]       = useState<AppStage>("ringing")
-  const [turns,       setTurns]       = useState<Turn[]>([])
-  const [activeTurnIdx,setActiveTurn] = useState<number|null>(null)
-  const [speaking,    setSpeaking]    = useState(false)
-  const [triage,      setTriage]      = useState<TriageData>({})
-  const [brainVisible,setBrainVisible]= useState(false)
-  const [selectedId,  setSelectedId]  = useState<string|null>(null)
-  const [agentSteps,  setAgentSteps]  = useState(["Waiting for incoming call…"])
-  const [elapsed,     setElapsed]     = useState(0)
-  const timers=useRef<ReturnType<typeof setTimeout>[]>([])
+  const live=useRelayLive()
+  const {stage,turns,speaking,triage,brainVisible,priority,agentSteps,resources,matches,
+    selectedId,callerLatLng,detectedLanguage,micError,setSelectedId,startCall,endCall}=live
 
-  const clr=()=>{timers.current.forEach(clearTimeout);timers.current=[]}
-  const at=(fn:()=>void,ms:number)=>timers.current.push(setTimeout(fn,ms))
+  const [elapsed,setElapsed]=useState(0)
 
-  // Elapsed clock
+  // Elapsed clock — runs while a call is live.
   useEffect(()=>{
     if(stage==="ringing"){setElapsed(0);return}
     const id=setInterval(()=>setElapsed(p=>p+1),1000)
     return()=>clearInterval(id)
   },[stage])
 
-  // Agent steps sync
-  useEffect(()=>{
-    if(stage==="ringing")return
-    const vis=AGENT_STEPS.filter(s=>s.t<=elapsed).map(s=>s.text)
-    if(vis.length)setAgentSteps(vis)
-  },[elapsed,stage])
-
-  const handleAnswer=useCallback(()=>{
-    clr()
-    setStage("listening")
-    setTurns([]);setTriage({});setBrainVisible(false);setSelectedId(null)
-    setAgentSteps([AGENT_STEPS[0].text]);setSpeaking(false);setActiveTurn(null)
-
-    // Stream turns with speaking tracking
-    let cursor=0
-    TURNS_DATA.forEach((td,i)=>{
-      // Show turn bubble
-      at(()=>{
-        setTurns(prev=>[...prev,{speaker:td.speaker,text:td.text,translation:td.translation}])
-        setActiveTurn(i)
-        if(td.speaker==="caller"){setSpeaking(true)}
-      },cursor)
-      cursor+=td.speakMs+600
-      // Stop speaking after caller turn
-      if(td.speaker==="caller"){
-        at(()=>setSpeaking(false),cursor-400)
-      }
-    })
-
-    // Brain popup at 5s
-    at(()=>setBrainVisible(true),5000)
-    at(()=>setTriage(p=>({...p,needs:"Drinking water · shelter"})),7000)
-    at(()=>setTriage(p=>({...p,people:"4 — one family, 2 adults & 2 children"})),11000)
-    at(()=>setTriage(p=>({...p,location:"Montrose area, near Westheimer & Kirby"})),13000)
-    at(()=>setTriage(p=>({...p,medical:"No injuries reported · safe to transport"})),14500)
-    at(()=>setTriage(p=>({...p,danger:"Rapidly rising floodwater — time-sensitive"})),15500)
-
-    // Transition to matched
-    at(()=>{
-      setStage("matched")
-      setBrainVisible(false)
-      setActiveTurn(null)
-      setSpeaking(false)
-      setSelectedId(MATCHES[0].id)
-    },22000)
-  },[])
-
-  const handleEndCall=useCallback(()=>{
-    clr()
-    setStage("ringing")
-    setTurns([]);setTriage({});setBrainVisible(false);setSelectedId(null)
-    setElapsed(0);setSpeaking(false);setActiveTurn(null)
-    setAgentSteps(["Waiting for incoming call…"])
-  },[])
-
   const handleResourceClick=useCallback((id:string)=>{
-    if(MATCHES.find(r=>r.id===id))setSelectedId(prev=>prev===id?null:id)
-  },[])
+    if(matches.find(r=>r.id===id))setSelectedId(selectedId===id?null:id)
+  },[matches,selectedId,setSelectedId])
 
-  const callerVisible=stage!=="ringing"
-  const matchIds=MATCHES.map(r=>r.id)
-  const priority: "P1"|"P2"=triage.danger?"P1":"P2"
+  const callerVisible=callerLatLng!=null
+  const matchIds=matches.map(r=>r.id)
   const fmt=(s:number)=>`${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`
+  const priorityLabel=priority==="P1"?"P1 · Critical":priority==="P3"?"P3 · Stable":"P2 · Urgent"
+  const priorityColor=priority==="P1"?C.poppy:priority==="P3"?C.teal:C.amber
 
   return(
     <div style={{width:"100%",height:"100%",display:"flex",flexDirection:"column",overflow:"hidden",
@@ -597,7 +489,7 @@ export default function App(){
         {/* Right — timer + end call + avatar */}
         {stage!=="ringing"&&<>
           <span style={{fontFamily:"JetBrains Mono,monospace",fontSize:12,color:C.inkSoft,marginRight:12}}>{fmt(elapsed)}</span>
-          <button onClick={handleEndCall} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px",
+          <button onClick={endCall} style={{display:"flex",alignItems:"center",gap:5,padding:"5px 11px",
             borderRadius:7,background:C.poppy,color:"white",border:"none",cursor:"pointer",fontSize:11,fontWeight:700,
             marginRight:12}}>
             <PhoneOff size={12}/> End Call
@@ -629,16 +521,16 @@ export default function App(){
                   <div style={{fontWeight:700,fontSize:13,color:C.ink}}>
                     {stage==="matched"?"Match complete":"Incoming caller"}
                   </div>
-                  <div style={{fontSize:11,color:C.inkMid}}>Detected language · <strong>Hindi</strong></div>
+                  <div style={{fontSize:11,color:C.inkMid}}>Detected language · <strong>{detectedLanguage}</strong></div>
                 </div>
               </div>
             )}
           </div>
           {/* Body */}
           <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-            {stage==="ringing"&&<EarRinging onAnswer={handleAnswer}/>}
-            {stage==="listening"&&<EarListening turns={turns} activeTurnIdx={activeTurnIdx} speaking={speaking}/>}
-            {stage==="matched"&&<MatchmakerPanel selectedId={selectedId} onSelect={setSelectedId}/>}
+            {stage==="ringing"&&<EarRinging onAnswer={startCall} micError={micError}/>}
+            {stage==="listening"&&<EarListening turns={turns} speaking={speaking} langLabel={detectedLanguage}/>}
+            {stage==="matched"&&<MatchmakerPanel matches={matches} triage={triage} selectedId={selectedId} onSelect={setSelectedId}/>}
           </div>
           {/* Agent log always present */}
           <AgentLog steps={agentSteps}/>
@@ -646,10 +538,10 @@ export default function App(){
 
         {/* Map area (full right side) */}
         <div style={{flex:1,position:"relative",overflow:"hidden"}}>
-          <MapPanel selectedId={selectedId} callerVisible={callerVisible} onResourceClick={handleResourceClick} matchIds={matchIds}/>
+          <MapPanel resources={resources} callerLatLng={callerLatLng} selectedId={selectedId} onResourceClick={handleResourceClick} matchIds={matchIds}/>
 
           {/* Brain triage popup */}
-          {brainVisible&&<BrainPopup triage={triage} priority={priority} onClose={()=>setBrainVisible(false)}/>}
+          {brainVisible&&<BrainPopup triage={triage} priority={priority} onClose={()=>{/* stays open during live call */}}/>}
 
           {/* Legend — bottom right, above dispatch bar */}
           <div style={{position:"absolute",bottom: stage==="matched"&&selectedId ? 72 : 16,right:16,zIndex:1000,borderRadius:10,
@@ -674,7 +566,7 @@ export default function App(){
 
           {/* Dispatch bar */}
           {stage==="matched"&&selectedId&&(()=>{
-            const r=RESOURCES.find(x=>x.id===selectedId);if(!r)return null
+            const r=resources.find(x=>x.id===selectedId);if(!r)return null
             const col=typeColor(r.type)
             return(
               <div style={{position:"absolute",bottom:16,left:"50%",transform:"translateX(-50%)",zIndex:1000,
@@ -686,10 +578,10 @@ export default function App(){
                 <span style={{fontSize:12,fontWeight:500,color:C.ink}}>
                   <span style={{color:C.inkSoft}}>Routing to </span>
                   <strong>{r.name}</strong>
-                  <span style={{color:C.inkSoft}}> · {r.distanceKm} km · {r.remaining} beds avail.</span>
+                  <span style={{color:C.inkSoft}}> · {r.distanceKm} km · {r.remaining} open</span>
                 </span>
                 <span style={{fontSize:10,fontWeight:800,padding:"3px 10px",borderRadius:5,flexShrink:0,
-                  background:C.amber,color:C.ink}}>P2 · Urgent</span>
+                  background:priorityColor,color:priority==="P1"?"#fff":C.ink}}>{priorityLabel}</span>
               </div>
             )
           })()}
@@ -700,14 +592,14 @@ export default function App(){
               <div style={{textAlign:"center",background:"rgba(245,228,204,0.93)",border:`1px solid ${C.border}`,
                 borderRadius:16,padding:"28px 36px",backdropFilter:"blur(12px)"}}>
                 <div style={{fontSize:14,fontWeight:700,color:C.ink,marginBottom:4}}>Intake system ready</div>
-                <div style={{fontSize:12,color:C.inkMid}}>Answer the call to begin the simulation</div>
+                <div style={{fontSize:12,color:C.inkMid}}>Answer the call to begin — speak into your mic in any language</div>
               </div>
             </div>
           )}
 
           <div style={{position:"absolute",bottom:8,left:8,zIndex:1000,fontSize:10,color:C.inkFaint,
             background:"rgba(245,228,204,0.85)",padding:"3px 8px",borderRadius:4}}>
-            Prototype · Mock dataset · Houston, TX
+            Live · Houston, TX · Redis vector match + Claude triage
           </div>
         </div>
       </div>
