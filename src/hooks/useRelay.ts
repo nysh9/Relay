@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import type {
+  AgentPrompt,
   Dispatch as RelayDispatch,
   EscalateTarget,
   Session,
@@ -48,6 +49,7 @@ const INITIAL_SESSION: Session = {
   startTime: 0,
   status: "idle",
   transcripts: [],
+  agentPrompts: [],
   triage: null,
   dispatch: null,
 };
@@ -64,6 +66,7 @@ type RelayAction =
   | { type: "DISPATCH"; dispatch: RelayDispatch }
   | { type: "ESCALATION"; escalate: EscalateTarget; reason?: string }
   | { type: "REPROMPT"; message: string }
+  | { type: "ADD_AGENT_PROMPT"; prompt: AgentPrompt }
   | { type: "LOAD_MOCK" };
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
@@ -157,6 +160,15 @@ function relayReducer(state: RelayState, action: RelayAction): RelayState {
     case "REPROMPT":
       return { ...state, repromptMessage: action.message };
 
+    case "ADD_AGENT_PROMPT":
+      return {
+        ...state,
+        session: {
+          ...state.session,
+          agentPrompts: [...state.session.agentPrompts, action.prompt],
+        },
+      };
+
     case "LOAD_MOCK":
       return {
         ...state,
@@ -168,6 +180,21 @@ function relayReducer(state: RelayState, action: RelayAction): RelayState {
     default:
       return state;
   }
+}
+
+// Map a base language code to a BCP-47 tag for the browser SpeechSynthesis voice.
+function toBcp47(code: string): string {
+  const map: Record<string, string> = {
+    hi: "hi-IN",
+    es: "es-ES",
+    en: "en-US",
+    fr: "fr-FR",
+    pt: "pt-BR",
+    ar: "ar-SA",
+    zh: "zh-CN",
+  };
+  const base = (code || "en").toLowerCase().split("-")[0];
+  return map[base] ?? code;
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
@@ -194,54 +221,129 @@ export function useRelay(): UseRelayReturn {
     isDemoMode,
   });
 
+  // True while RELAY is speaking a question back — used to mute mic capture so we
+  // don't transcribe our own voice. Ref so the mic callback always sees latest.
+  const isSpeakingRef = useRef(false);
+  // The last question we asked, so repeated final transcripts don't re-ask/re-speak it.
+  const lastAskedRef = useRef<string | null>(null);
+
+  // Speak a question back to the caller in their language. Tries Deepgram TTS
+  // (/api/speak); falls back to the browser's voice for languages Deepgram
+  // doesn't support (e.g. Hindi). Mutes the mic for the duration.
+  const speak = useCallback(async (text: string, language: string) => {
+    isSpeakingRef.current = true;
+    const done = () => {
+      isSpeakingRef.current = false;
+    };
+    try {
+      const res = await fetch("/api/speak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, language }),
+      });
+      if (res.ok) {
+        const url = URL.createObjectURL(await res.blob());
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          done();
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          done();
+        };
+        await audio.play();
+        return;
+      }
+      // 415 (unsupported language / no key) → fall through to browser voice
+    } catch (err) {
+      console.warn("[RELAY] /api/speak failed, using browser voice", err);
+    }
+    try {
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = toBcp47(language);
+        u.onend = done;
+        u.onerror = done;
+        window.speechSynthesis.speak(u);
+        return;
+      }
+    } catch (err) {
+      console.warn("[RELAY] browser TTS failed", err);
+    }
+    done();
+  }, []);
+
   // ── Triage → Dispatch pipeline ─────────────────────────────────────────────
   // On every FINAL transcript we run the rest of the pipeline:
   //   transcript → /api/triage (Brain/Claude) → /api/dispatch (Matchmaker).
-  // Both API routes adapt their backend's shape into the frontend contract, and
-  // we feed the results into the reducer so the TriageCard, DispatchPanel and
-  // map light up. Errors are logged but never crash the call.
-  const runPipeline = useCallback(async (text: string, sessionId: string) => {
-    try {
-      const triageRes = await fetch("/api/triage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transcript: text, sessionId }),
-      });
-      if (!triageRes.ok) {
-        console.error("[RELAY] /api/triage failed:", triageRes.status);
-        return;
-      }
-      const triage: Triage = await triageRes.json();
-      dispatch({ type: "TRIAGE_UPDATE", triage });
+  // If the Brain still needs info, it returns nextQuestion (in the caller's
+  // language) — we surface it as a RELAY turn and speak it back. Errors are
+  // logged but never crash the call.
+  const runPipeline = useCallback(
+    async (text: string, sessionId: string, language: string) => {
+      try {
+        const triageRes = await fetch("/api/triage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript: text, sessionId, language }),
+        });
+        if (!triageRes.ok) {
+          console.error("[RELAY] /api/triage failed:", triageRes.status);
+          return;
+        }
+        const triage: Triage = await triageRes.json();
+        dispatch({ type: "TRIAGE_UPDATE", triage });
 
-      if (triage.escalate) {
-        dispatch({ type: "ESCALATION", escalate: triage.escalate });
-        return; // escalation beats routing — don't send a 911/human case to a shelter
-      }
+        if (triage.escalate) {
+          dispatch({ type: "ESCALATION", escalate: triage.escalate });
+          return; // escalation beats routing
+        }
 
-      if (!triage.readyToRoute || !triage.location || triage.needs.length === 0) {
-        return; // Brain still gathering info — wait for the next utterance
-      }
+        // Brain still gathering info → ask the caller the follow-up out loud.
+        if (!triage.readyToRoute) {
+          if (
+            triage.nextQuestion &&
+            triage.nextQuestion !== lastAskedRef.current
+          ) {
+            lastAskedRef.current = triage.nextQuestion;
+            dispatch({
+              type: "ADD_AGENT_PROMPT",
+              prompt: {
+                text: triage.nextQuestion,
+                textEnglish: triage.nextQuestionEnglish,
+                language: language || "en",
+                timestamp: Date.now(),
+              },
+            });
+            void speak(triage.nextQuestion, language || "en");
+          }
+          return;
+        }
 
-      const dispatchRes = await fetch("/api/dispatch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          needs: triage.needs,
-          location: triage.location,
-          sessionId,
-        }),
-      });
-      if (!dispatchRes.ok) {
-        console.error("[RELAY] /api/dispatch failed:", dispatchRes.status);
-        return;
+        if (!triage.location || triage.needs.length === 0) return;
+
+        const dispatchRes = await fetch("/api/dispatch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            needs: triage.needs,
+            location: triage.location,
+            sessionId,
+          }),
+        });
+        if (!dispatchRes.ok) {
+          console.error("[RELAY] /api/dispatch failed:", dispatchRes.status);
+          return;
+        }
+        const dispatchResult: RelayDispatch = await dispatchRes.json();
+        dispatch({ type: "DISPATCH", dispatch: dispatchResult });
+      } catch (err) {
+        console.error("[RELAY] pipeline error:", err);
       }
-      const dispatchResult: RelayDispatch = await dispatchRes.json();
-      dispatch({ type: "DISPATCH", dispatch: dispatchResult });
-    } catch (err) {
-      console.error("[RELAY] pipeline error:", err);
-    }
-  }, []);
+    },
+    [speak]
+  );
 
   // ── WS message handler ─────────────────────────────────────────────────────
 
@@ -262,8 +364,13 @@ export function useRelay(): UseRelayReturn {
           if (msg.transcript) {
             dispatch({ type: "FINAL_TRANSCRIPT", transcript: msg.transcript });
             // Kick off the rest of the pipeline with the transcript's own
-            // sessionId (the server stamps it on every WireTranscript).
-            void runPipeline(msg.transcript.text, msg.transcript.sessionId);
+            // sessionId + detected language (server stamps both on every
+            // WireTranscript) so the Brain can ask follow-ups in that language.
+            void runPipeline(
+              msg.transcript.text,
+              msg.transcript.sessionId,
+              msg.transcript.language
+            );
           }
           break;
         case "triage_update":
@@ -317,9 +424,12 @@ export function useRelay(): UseRelayReturn {
   // ── Mic ────────────────────────────────────────────────────────────────────
 
   const { startMic, stopMic } = useMic({
-    onChunk: sendAudioChunk,
-    onError: (err) =>
-      console.error("[RELAY mic error]", err),
+    // Drop audio chunks while RELAY is speaking so it doesn't transcribe its own
+    // voice (TTS) and loop. Capture stays running; we just don't forward them.
+    onChunk: (pcm) => {
+      if (!isSpeakingRef.current) sendAudioChunk(pcm);
+    },
+    onError: (err) => console.error("[RELAY mic error]", err),
   });
 
   // ── Public API ─────────────────────────────────────────────────────────────

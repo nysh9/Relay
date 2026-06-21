@@ -87,8 +87,24 @@ app.get('/health', (_req: Request, res: Response) => {
  * Body: { transcript: string, sessionId: string }
  * Response: { triage: Triage, sessionId: string }
  */
+// Map a BCP-47 code (Deepgram's detected language) to a human language name for
+// the Brain prompt, so Claude phrases nextQuestion in the caller's language.
+function languageName(code?: string): string {
+  const map: Record<string, string> = {
+    hi: 'Hindi',
+    es: 'Spanish',
+    en: 'English',
+    fr: 'French',
+    pt: 'Portuguese',
+    ar: 'Arabic',
+    zh: 'Chinese',
+  };
+  const base = (code ?? '').toLowerCase().split('-')[0];
+  return map[base] ?? 'Hindi';
+}
+
 app.post('/triage', async (req: Request, res: Response) => {
-  const { transcript, sessionId } = req.body as TriageRequest;
+  const { transcript, sessionId, language } = req.body as TriageRequest;
 
   // Basic validation — both fields are required; missing either means the
   // Ear sent a malformed request.
@@ -105,7 +121,7 @@ app.post('/triage', async (req: Request, res: Response) => {
   //    for slots it couldn't fill yet) — session.ts merge rules handle the rest.
   let freshTriage: Triage;
   try {
-    freshTriage = await runBrain(transcript, existingPartial);
+    freshTriage = await runBrain(transcript, existingPartial, languageName(language));
   } catch (err) {
     // Surface Claude errors clearly so the Ear can decide whether to retry
     // or tell the operator something went wrong.

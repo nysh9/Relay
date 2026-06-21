@@ -12,16 +12,23 @@
 
 import { useEffect, useRef } from "react";
 import clsx from "clsx";
-import type { Transcript } from "@/types/contracts";
+import type { AgentPrompt, Transcript } from "@/types/contracts";
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
+  agentPrompts?: AgentPrompt[];
   repromptMessage: string | null;
   isListening: boolean;
 }
 
+// One conversation turn — either a caller transcript or a RELAY spoken question.
+type Turn =
+  | { kind: "caller"; ts: number; transcript: Transcript }
+  | { kind: "agent"; ts: number; prompt: AgentPrompt };
+
 export function TranscriptPanel({
   transcripts,
+  agentPrompts = [],
   repromptMessage,
   isListening,
 }: TranscriptPanelProps) {
@@ -30,10 +37,19 @@ export function TranscriptPanel({
   // Keep latest line visible
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcripts]);
+  }, [transcripts, agentPrompts]);
 
-  const finalLines = transcripts.filter((t) => t.isFinal);
   const interimLine = transcripts.find((t) => !t.isFinal) ?? null;
+
+  // Interleave caller turns and RELAY turns by timestamp into one conversation.
+  const turns: Turn[] = [
+    ...transcripts
+      .filter((t) => t.isFinal)
+      .map((t): Turn => ({ kind: "caller", ts: t.timestamp, transcript: t })),
+    ...agentPrompts.map(
+      (p): Turn => ({ kind: "agent", ts: p.timestamp, prompt: p })
+    ),
+  ].sort((a, b) => a.ts - b.ts);
 
   return (
     <section className="flex flex-col h-full">
@@ -70,14 +86,34 @@ export function TranscriptPanel({
           <p className="text-gray-500 text-sm italic">Listening…</p>
         )}
 
-        {finalLines.map((t) => (
-          <p
-            key={t.timestamp}
-            className="text-sm text-gray-100 leading-relaxed animate-fade-in"
-          >
-            {t.text}
-          </p>
-        ))}
+        {turns.map((turn) =>
+          turn.kind === "caller" ? (
+            <p
+              key={`c-${turn.ts}`}
+              className="text-sm text-gray-100 leading-relaxed animate-fade-in"
+            >
+              {turn.transcript.text}
+            </p>
+          ) : (
+            <div
+              key={`a-${turn.ts}`}
+              className="px-3 py-2 rounded-md bg-green-900/30 border border-green-700/40 animate-slide-in"
+            >
+              <div className="text-[9px] font-mono uppercase tracking-widest text-green-500 mb-1">
+                RELAY → Caller
+              </div>
+              <p className="text-sm text-green-100 leading-relaxed">
+                {turn.prompt.text}
+              </p>
+              {turn.prompt.textEnglish && (
+                <p className="mt-1 text-xs text-green-400/70 italic leading-relaxed">
+                  <span className="font-mono not-italic mr-1">EN</span>
+                  {turn.prompt.textEnglish}
+                </p>
+              )}
+            </div>
+          )
+        )}
 
         {/* Interim line — dimmer, italic, no animation (updates fast) */}
         {interimLine && (

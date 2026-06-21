@@ -21,9 +21,10 @@ RULES — follow these exactly:
 4. Set escalate to "911" ONLY if the situation involves active medical emergency, fire, or violence — not mass-care needs like water, shelter, or food.
 5. Set escalate to "human" ONLY if the caller is incoherent, inaudible, or the situation remains dangerously ambiguous after all fields are filled. Missing fields alone do NOT trigger escalate — that is handled by nextQuestion.
 6. For all normal mass-care situations (water, shelter, food, medical supplies), set escalate to "none".
-7. If critical fields are missing (location, people, needs), set the most important missing one as nextQuestion in plain English, and set readyToRoute to false.
-8. When readyToRoute is true, always set nextQuestion to null.
+7. If critical fields are missing (location, people, needs), ask for the most important missing one. Put that question in nextQuestion, written IN THE CALLER'S LANGUAGE (${language}) so it can be spoken back to them. Put its English translation in nextQuestionEnglish. Set readyToRoute to false.
+8. When readyToRoute is true, always set nextQuestion AND nextQuestionEnglish to null.
 9. Only set readyToRoute to true when you have: location, number of people, and at least one need.
+10. nextQuestion must be a natural, calm spoken question in ${language} (this is read aloud to a caller in crisis). nextQuestionEnglish is the same question in English.
 
 REQUIRED OUTPUT SHAPE:
 {
@@ -35,7 +36,8 @@ REQUIRED OUTPUT SHAPE:
   "needs": ["water", "shelter", "medical", ...],
   "priority": "P1" or "P2" or "P3",
   "missingFields": ["location", "people", ...],
-  "nextQuestion": "<question to ask caller in English, or null>",
+  "nextQuestion": "<question to ask the caller, in ${language}, or null>",
+  "nextQuestionEnglish": "<the same question in English, or null>",
   "readyToRoute": <true or false>,
   "escalate": "none" or "human" or "911"
 }
@@ -73,6 +75,7 @@ Return the updated triage JSON now.`;
   // If we're ready to route, there's no question to ask.
   if (parsed.readyToRoute) {
     parsed.nextQuestion = null;
+    parsed.nextQuestionEnglish = null;
   }
   return parsed;
 }
