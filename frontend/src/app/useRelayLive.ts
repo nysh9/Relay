@@ -169,6 +169,56 @@ const LANG_NAME: Record<string, string> = {
   zh: 'Chinese',
 }
 
+// ── Voice-back (TTS) ─────────────────────────────────────────────────────────
+// RELAY speaks its follow-up questions aloud. Primary path: Deepgram Aura via the
+// Next app's /api/speak route (en/es), proxied by Vite. For languages Deepgram
+// doesn't voice (e.g. Hindi → 415) or if /api/speak is unreachable, we fall back
+// to the browser's built-in SpeechSynthesis so it ALWAYS speaks.
+let currentAudio: HTMLAudioElement | null = null
+
+function stopSpeaking() {
+  try {
+    window.speechSynthesis?.cancel()
+  } catch {
+    /* no-op */
+  }
+  if (currentAudio) {
+    currentAudio.pause()
+    currentAudio = null
+  }
+}
+
+async function speakText(text: string, language: string) {
+  if (!text) return
+  stopSpeaking()
+  try {
+    const res = await fetch('/api/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, language }),
+    })
+    const ct = res.headers.get('content-type') ?? ''
+    if (res.ok && ct.includes('audio')) {
+      const url = URL.createObjectURL(new Blob([await res.arrayBuffer()], { type: 'audio/mpeg' }))
+      const audio = new Audio(url)
+      currentAudio = audio
+      audio.onended = () => URL.revokeObjectURL(url)
+      await audio.play()
+      return
+    }
+  } catch {
+    /* fall through to the browser voice */
+  }
+  // Deepgram unsupported (415) or /api/speak unreachable → browser SpeechSynthesis.
+  try {
+    const u = new SpeechSynthesisUtterance(text)
+    u.lang = language || 'en-US'
+    window.speechSynthesis?.speak(u)
+  } catch {
+    /* no TTS available in this browser */
+  }
+}
+
 export interface RelayLive {
   stage: Stage
   turns: Turn[]
@@ -292,8 +342,10 @@ export function useRelayLive(): RelayLive {
         if (t.readyToRoute) {
           await runDispatch(t)
         } else if (t.nextQuestionEnglish || t.nextQuestion) {
-          // RELAY asks the follow-up (shown to the operator in English).
+          // RELAY asks the follow-up: shown to the operator in English, and
+          // spoken aloud in the CALLER's language (Deepgram, browser fallback).
           setTurns((prev) => [...prev, { speaker: 'relay', text: t.nextQuestionEnglish ?? t.nextQuestion ?? '' }])
+          void speakText(t.nextQuestion ?? t.nextQuestionEnglish ?? '', wt.language)
         }
       } catch (err) {
         pushStep('Brain unreachable')
@@ -411,6 +463,7 @@ export function useRelayLive(): RelayLive {
   }, [handleEarMessage, pushStep, startMic])
 
   const endCall = useCallback(() => {
+    stopSpeaking()
     try {
       wsRef.current?.send(JSON.stringify({ type: 'session_end' }))
     } catch {
