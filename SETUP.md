@@ -60,6 +60,37 @@ cd matchmaker && npm install && npm run dev   # :3002 (downloads model on first 
 
 ---
 
+## Urgency classifier (stretch §9)
+
+A trained TF-IDF + LogisticRegression model (Python/FastAPI, `classifier/`) rates
+P1/P2/P3 from triage text. The Brain consults it and takes the **more severe** of
+(Claude, classifier) — over-escalation bias. If it's unreachable, the Brain keeps
+Claude's priority, so it never blocks the demo.
+
+```bash
+cd classifier
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+python generate_data.py     # writes data.csv (committed; --use-claude to regen via Claude)
+python train.py             # → model.pkl + confusion_matrix.png (prints accuracy + matrix)
+python server.py            # serves /classify on :8000
+```
+
+Then point the Brain at it (defaults shown):
+
+```bash
+# in the Brain's shell
+export CLASSIFIER_URL=http://localhost:8000
+```
+
+If port 8000 is taken, run `CLASSIFIER_PORT=8077 python server.py` and set
+`CLASSIFIER_URL=http://localhost:8077` for the Brain.
+
+`POST /classify {"text": "..."}` → `{"priority": "P1|P2|P3", "confidence": 0.0-1.0}`.
+
+---
+
 ## Swapping in the custom map style
 
 1. Upload your map style to Mapbox Studio and copy the style URL  
