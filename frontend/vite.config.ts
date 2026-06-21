@@ -31,6 +31,24 @@ export default defineConfig({
     },
   },
 
+  // Proxy backend calls so the browser hits the Vite origin (no CORS): the Brain
+  // (triage) and the standalone Redis vector-search Matchmaker (dispatch). The
+  // Ear WebSocket (live transcript) is connected to directly at ws://localhost:8080.
+  server: {
+    proxy: {
+      '/api/triage': {
+        target: 'http://localhost:4001',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/triage/, '/triage'),
+      },
+      '/api/dispatch': {
+        target: 'http://localhost:3002',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api\/dispatch/, '/dispatch'),
+      },
+    },
+  },
+
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
   assetsInclude: ['**/*.svg', '**/*.csv'],
 })
