@@ -25,6 +25,70 @@ Press **▶ Run Demo Script** in the sidebar to animate the full pipeline live.
 | `MATCHMAKER_API_URL` | `http://localhost:3002` | Person C's dispatch API |
 | `NEXT_PUBLIC_DEMO_MODE` | `true` | `false` to connect to the real backend |
 
+Backend services (export in the shell that runs each one — see `.env.example`):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Claude key for the Brain (`brain/`) |
+| `REDIS_URL` | `redis://localhost:6379` | Shared Redis Stack — Brain session memory + Matchmaker vector index |
+
+---
+
+## Redis (session memory + vector search)
+
+The Brain (session memory, per-call, TTL-wiped) and the Matchmaker (resource
+vector search) share one **Redis Stack** instance (Redis + Query Engine). Start it
+with Docker from the repo root:
+
+```bash
+docker compose up -d redis     # start Redis Stack on :6379
+docker exec relay-redis redis-cli ping   # → PONG
+docker compose down            # stop
+```
+
+- **Brain** stores each call's partial triage at `relay:session:{sessionId}` with a
+  1-hour TTL, deleted on `POST /session/clear` (privacy guardrail §2).
+- **Matchmaker** seeds `matchmaker/resources.json` into Redis on boot, embeds each
+  resource's capabilities (local all-MiniLM, no API key), and serves `POST /dispatch`
+  via KNN vector recall + deterministic distance/capacity ranking. It degrades to
+  keyword (TAG) matching if the embedding model is unavailable, so the demo never
+  hard-fails.
+
+```bash
+cd matchmaker && npm install && npm run dev   # :3002 (downloads model on first run)
+```
+
+---
+
+## Urgency classifier (stretch §9)
+
+A trained TF-IDF + LogisticRegression model (Python/FastAPI, `classifier/`) rates
+P1/P2/P3 from triage text. The Brain consults it and takes the **more severe** of
+(Claude, classifier) — over-escalation bias. If it's unreachable, the Brain keeps
+Claude's priority, so it never blocks the demo.
+
+```bash
+cd classifier
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+python generate_data.py     # writes data.csv (committed; --use-claude to regen via Claude)
+python train.py             # → model.pkl + confusion_matrix.png (prints accuracy + matrix)
+python server.py            # serves /classify on :8000
+```
+
+Then point the Brain at it (defaults shown):
+
+```bash
+# in the Brain's shell
+export CLASSIFIER_URL=http://localhost:8000
+```
+
+If port 8000 is taken, run `CLASSIFIER_PORT=8077 python server.py` and set
+`CLASSIFIER_URL=http://localhost:8077` for the Brain.
+
+`POST /classify {"text": "..."}` → `{"priority": "P1|P2|P3", "confidence": 0.0-1.0}`.
+
 ---
 
 ## Swapping in the custom map style
