@@ -19,6 +19,7 @@
 // brain.ts will be written next — it owns the actual Anthropic SDK call.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import 'dotenv/config'; // load brain/.env (ANTHROPIC_API_KEY) before anything reads it
 import express, { Request, Response, NextFunction } from 'express';
 import { getSession, updateSession, clearSession } from './session';
 import { Triage, TriageRequest, TriageResponse } from './types';
@@ -149,8 +150,10 @@ app.post('/session/clear', (req: Request, res: Response) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 // Use PORT from the environment so deployment platforms (Railway, Fly, etc.)
-// can inject their own port without code changes.
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
+// can inject their own port without code changes. Default 4001 — deliberately
+// OUTSIDE Next.js's 3000→3001→3002 auto-increment range so a bumped `next dev`
+// can never steal the Brain's port (that collision caused /api/triage 404s).
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4001;
 
 app.listen(PORT, () => {
   console.log(`[RELAY Brain] listening on http://localhost:${PORT}`);

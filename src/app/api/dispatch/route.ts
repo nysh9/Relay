@@ -1,38 +1,74 @@
 /**
- * /api/dispatch — proxy to Person C's Matchmaker service.
+ * /api/dispatch — runs Person C's Matchmaker in-process + shape adapter.
  *
- * POST body: Triage object (§4 contract) — sent once readyToRoute: true
- * Response:  Dispatch object (§4 contract)
+ * Takes the caller's needs + spoken location, geocodes the location (Mapbox),
+ * runs the deterministic findMatch() over the Houston resource dataset, then
+ * enriches the result into the frontend Dispatch contract (full Resource
+ * objects + callerLatLng) so the map can render pins and the routing line.
+ *
+ * POST body: { needs: string[], location: string, sessionId: string }
+ * Response:  Dispatch (contracts.ts shape)
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { geocodeLocation } from "../../../../lib/geocode";
+import { findMatch } from "../../../../lib/matchmaker";
+import resourcesData from "../../../../data/resources.json";
+import type { Resource as MatchResource } from "../../../../types";
+import type { Dispatch, Resource } from "@/types/contracts";
 
-const MATCHMAKER_URL = process.env.MATCHMAKER_API_URL ?? "http://localhost:3002";
+const resources = resourcesData as MatchResource[];
+
+function lookup(id: string): Resource | null {
+  const r = resources.find((res) => res.id === id);
+  return (r as unknown as Resource) ?? null;
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const { needs, location, sessionId } = (await req.json()) as {
+      needs?: string[];
+      location?: string;
+      sessionId?: string;
+    };
 
-    const upstream = await fetch(`${MATCHMAKER_URL}/dispatch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!upstream.ok) {
+    if (!location || !needs || needs.length === 0) {
       return NextResponse.json(
-        { error: `Matchmaker service error: ${upstream.status}` },
-        { status: upstream.status }
+        { error: "needs and location are required to route" },
+        { status: 400 }
       );
     }
 
-    const dispatch = await upstream.json();
+    // Caller location ALWAYS comes from the call text, never device GPS (§5.5).
+    const callerLoc = await geocodeLocation(location);
+
+    // Deterministic match — never invents a resource (§2 guardrail).
+    const result = findMatch(needs, callerLoc, resources);
+
+    const matchedResource = result.matched ? lookup(result.matched.resourceId) : null;
+    const candidates: Resource[] = [];
+    if (matchedResource) candidates.push(matchedResource);
+    for (const alt of result.alternatives) {
+      const r = lookup(alt.resourceId);
+      if (r) candidates.push(r);
+    }
+
+    const dispatch: Dispatch = {
+      sessionId: sessionId ?? "",
+      matchedResource,
+      dispatchText: result.dispatchText,
+      distanceKm: result.matched?.distanceKm ?? null,
+      callerLatLng: [callerLoc.lat, callerLoc.lng],
+      candidates,
+      timestamp: Date.now(),
+    };
+
     return NextResponse.json(dispatch);
   } catch (err) {
     console.error("[/api/dispatch]", err);
     return NextResponse.json(
-      { error: "Matchmaker service unreachable" },
-      { status: 503 }
+      { error: "Matchmaker failed", detail: String(err) },
+      { status: 500 }
     );
   }
 }

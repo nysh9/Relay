@@ -16,7 +16,7 @@
  * Parent page.tsx imports this with: next/dynamic + ssr: false
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type mapboxgl from "mapbox-gl";
 import type { Dispatch, Priority, Resource } from "@/types/contracts";
 
@@ -52,22 +52,32 @@ export function RelayMap({
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
-  const initializedRef = useRef(false);
+  // `mapReady` flips true on the Mapbox "load" event. The marker/caller/route
+  // effects depend on it so they re-run once the map actually exists — the map
+  // is created asynchronously (dynamic import), so without this flag those
+  // effects fire while mapRef.current is still null, bail out, and (because the
+  // mock data never changes) never run again. That left the map pin-less.
+  const [mapReady, setMapReady] = useState(false);
 
   // ── Init map ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!containerRef.current || initializedRef.current) return;
-    initializedRef.current = true;
+    if (!containerRef.current) return;
+
+    let map: mapboxgl.Map | null = null;
+    // StrictMode mounts → unmounts → mounts. The dynamic import resolves after
+    // the first cleanup, so guard against creating an orphaned second map.
+    let cancelled = false;
 
     // Dynamic import so Mapbox GL only loads in browser
     import("mapbox-gl").then((mapboxModule) => {
+      if (cancelled || !containerRef.current) return;
       const mapboxgl = mapboxModule.default;
 
       mapboxgl.accessToken =
         process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 
-      const map = new mapboxgl.Map({
+      const m = new mapboxgl.Map({
         container: containerRef.current!,
         // ── Swap this URL when you have the custom map style image ──
         // e.g. "mapbox://styles/your-username/your-style-id"
@@ -89,20 +99,24 @@ export function RelayMap({
         dragRotate: false,
       });
 
+      map = m;
+      console.log("[RELAY-DEBUG] map created");
+      m.on("error", (e) => console.log("[RELAY-DEBUG] map error: " + (e?.error?.message || "unknown")));
+
       // Navigation controls (zoom only, no rotation)
-      map.addControl(
+      m.addControl(
         new mapboxgl.NavigationControl({ showCompass: false }),
         "bottom-right"
       );
 
-      map.on("load", () => {
+      m.on("load", () => {
         // Add route line source (empty to start)
-        map.addSource("route", {
+        m.addSource("route", {
           type: "geojson",
           data: { type: "FeatureCollection", features: [] },
         });
 
-        map.addLayer({
+        m.addLayer({
           id: "route-line",
           type: "line",
           source: "route",
@@ -114,15 +128,19 @@ export function RelayMap({
             "line-opacity": 0.85,
           },
         });
-      });
 
-      mapRef.current = map;
+        // Map is live — let the data-dependent effects run now.
+        mapRef.current = m;
+        setMapReady(true);
+        console.log("[RELAY-DEBUG] map load fired, mapReady set true");
+      });
     });
 
     return () => {
-      mapRef.current?.remove();
+      cancelled = true;
+      setMapReady(false);
       mapRef.current = null;
-      initializedRef.current = false;
+      map?.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -131,9 +149,11 @@ export function RelayMap({
 
   useEffect(() => {
     const map = mapRef.current;
+    console.log("[RELAY-DEBUG] marker effect run " + JSON.stringify({ hasMap: !!map, mapReady, n: allResources.length, styleLoaded: map?.isStyleLoaded?.() }));
     if (!map) return;
 
     const waitForLoad = () => {
+      console.log("[RELAY-DEBUG] waitForLoad adding markers", allResources.length);
       // Clear old markers
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
@@ -189,12 +209,10 @@ export function RelayMap({
       });
     };
 
-    if (map.isStyleLoaded()) {
-      waitForLoad();
-    } else {
-      map.once("load", waitForLoad);
-    }
-  }, [allResources, matchedResource, priority]);
+    // mapReady is only true once the "load" event has fired, so the style is
+    // ready even though isStyleLoaded() can briefly report false here.
+    if (mapReady) waitForLoad();
+  }, [allResources, matchedResource, priority, mapReady]);
 
   // ── Caller pin ────────────────────────────────────────────────────────────
 
@@ -242,12 +260,8 @@ export function RelayMap({
       });
     };
 
-    if (map.isStyleLoaded()) {
-      addCallerPin();
-    } else {
-      map.once("load", addCallerPin);
-    }
-  }, [callerLatLng]);
+    if (mapReady) addCallerPin();
+  }, [callerLatLng, mapReady]);
 
   // ── Routing line ──────────────────────────────────────────────────────────
 
@@ -302,12 +316,8 @@ export function RelayMap({
       );
     };
 
-    if (map.isStyleLoaded()) {
-      drawRoute();
-    } else {
-      map.once("load", drawRoute);
-    }
-  }, [callerLatLng, matchedResource, priority]);
+    if (mapReady) drawRoute();
+  }, [callerLatLng, matchedResource, priority, mapReady]);
 
   return (
     <>

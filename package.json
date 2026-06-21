@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:all": "concurrently -n web,brain,ear -c blue,magenta,green \"npm run dev\" \"npm --prefix brain run dev\" \"npm --prefix server run dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -23,6 +24,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "autoprefixer": "^10.4.19",
+    "concurrently": "^10.0.3",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "postcss": "^8",
