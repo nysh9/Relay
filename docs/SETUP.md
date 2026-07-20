@@ -58,6 +58,12 @@ docker compose down            # stop
 cd matchmaker && npm install && npm run dev   # :3002 (downloads model on first run)
 ```
 
+> **⚠️ Two resource datasets, currently out of sync.** The Matchmaker service reads
+> `matchmaker/resources.json`, while the Next.js `/api/dispatch` route reads
+> `data/resources.json`. These two files have drifted apart. Before a real build,
+> pick one as the source of truth (or have one import the other) so both routing
+> paths dispatch against the same resources.
+
 ---
 
 ## Urgency classifier (stretch §9)
